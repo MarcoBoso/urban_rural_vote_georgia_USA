@@ -1,0 +1,722 @@
+---
+title: " Urban and rural voting behaviour in Georgia (U.S.A.) - Advanced Modelling Project"
+author: "Marco Boso"
+date: "2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Formulate a clear objective or question related with Social Science
+
+Does the common perception that rural residents with low levels of education overwhelmingly vote for the Republican Party, while urban residents with higher education levels automatically support the Democratic Party, truly reflect reality? Or is the situation more complex than this? Many newspapers have drawn this conclusion (<https://www.nytimes.com/2019/10/29/upshot/suburbs-demographics-red-blue.html>), so I have decided to verify this assumption by analyzing the voting macrocategories in the state of Georgia.
+
+Georgia is an ideal case study for this analysis because it has one of the highest numbers of counties in the United States - the third-highest, to be exact - which allows for a more granular and specific examination of voting trends compared to states like California, where the distinction between rural and urban areas is harder to define due to its 54 highly diverse counties.
+
+Additionally, Georgia’s recent voting history adds another layer of relevance to this analysis In the 2020 presidential election, the state was won by the Democratic candidate, now-President Joe Biden. However, in the 2024 election, the Republican candidate, now-President Donald Trump, secured victory in the state. This shift highlights the potential for dynamic political behavior across different regions, making Georgia a particularly interesting case.
+
+### Libraries that I will need
+
+```{r}
+library(readr)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(GGally)
+library(scales)
+library(factoextra)
+library(plotly)
+library(cluster)
+library(mclust)
+library(readxl)
+library(mice)
+library(maps)
+library(sf)  
+library(tigris) 
+```
+
+## Download the variables (input) you need to attain previous goal
+
+A dataset containing all the information I needed did not exist, so I had to create one by merging various datasets sourced from different governmental websites, such as the National Institutes of Health (NIH), GeorgiaData.org, Data.org, and Georgia.gov.
+
+First, I will download and save the dataset regarding the last presidential elections results that will be used at the end to assess whether I have achieved my initial goal. The other datasets I will import will be managed and combined to create the main dataset that will be used for this assignment.
+
+```{r}
+presidential_2024 <- 
+  read.csv('data_boso//2024_US_County_Level_Presidential_Results.csv')
+
+georgia_election <- presidential_2024 |>  
+    filter(state_name == "Georgia") |> 
+      rename(State = state_name) |> 
+        mutate(State = ifelse(State == "Georgia", "GA", State)) |> 
+          rename(pct_gop = per_gop, pct_dem = per_dem, pct_diff = per_point_diff, diff_gop_dem = diff) |> 
+            mutate(
+                    pct_gop = pct_gop * 100,
+                    pct_dem = pct_dem * 100,
+                    other_votes = total_votes - (votes_gop + votes_dem),
+                    pct_other = (other_votes / total_votes) * 100) |> 
+                       select(county_fips, county_name, total_votes, pct_gop, pct_dem, pct_other) 
+
+head(georgia_election)
+```
+
+Data about health index
+
+```{r}
+file_path <- "data_boso/2024 County Health Rankings Georgia Data - v2.xlsx"
+
+data_health <- read_excel(file_path, sheet = 'Select Measure Data', skip = 1)
+
+georgia_health <- data_health |> 
+  filter(FIPS != 13000) |>
+  select(County, 
+    `Food Environment Index`, 
+    `% Uninsured`, 
+    `Average Daily PM2.5`, 
+    `% Severe Housing Problems`, 
+    `% Fair or Poor Health`) |> 
+  mutate(County = paste0(County, " County")) |> 
+  rename(county_name = County)
+
+head(georgia_health)
+```
+
+Data about the population traits
+
+```{r}
+data_pop <- data_health <- read_excel(file_path, sheet = 'Additional Measure Data', skip = 1)
+
+georgia_pop <- data_pop |> 
+  filter(FIPS != 13000) |>
+  select(County, 
+    `Life Expectancy`, 
+    `Population`, 
+    `% 65 and Over`, 
+    `% Black`, 
+    `% Non-Hispanic White`) |> 
+  mutate(County = paste0(County, " County")) |> 
+  rename(county_name = County)
+  
+
+head(georgia_pop)
+```
+
+Data about the Education
+
+```{r}
+education_usa <- 
+  read.csv('data_boso//Education2023.csv')
+
+education_attributes <- c(
+  "Percent of adults who are not high school graduates, 2019-23",
+  "Percent of adults who are high school graduates (or equivalent), 2019-23",
+  "Percent of adults completing some college or associate degree, 2019-23",
+  "Percent of adults with a bachelor's degree or higher, 2019-23"
+)
+
+georgia_education <- education_usa |> 
+  filter(State == "GA", Attribute %in% education_attributes) |> 
+  filter(Area.name != 'Georgia') |> 
+  mutate(Attribute = case_when(
+    Attribute == "Percent of adults who are not high school graduates, 2019-23" ~ "pct_low_edu",
+    Attribute == "Percent of adults who are high school graduates (or equivalent), 2019-23" ~ "pct_middle_low_edu",
+    Attribute == "Percent of adults completing some college or associate degree, 2019-23" ~ "pct_middle_high_edu",
+    Attribute == "Percent of adults with a bachelor's degree or higher, 2019-23" ~ "pct_high_edu",
+    TRUE ~ Attribute  
+  )) |> 
+    pivot_wider(
+    names_from = Attribute,  
+    values_from = Value      
+  ) |> 
+  rename(county_name = Area.name, county_fips = FIPS.Code) |> 
+  select( -State)
+
+head(georgia_education)
+```
+
+Data about Income and Unemployment
+
+```{r}
+labour_usa <- read.csv('data_boso//Unemployment2023.csv')
+
+labour_attributes <- c(
+  "Unemployment_rate_2023",
+  "Median_Household_Income_2022"
+)
+
+georgia_labour <- labour_usa |> 
+  filter(State == 'GA', Attribute %in% labour_attributes) |> 
+  filter(Area_Name != 'Georgia') |> 
+    pivot_wider(
+    names_from = Attribute,  
+    values_from = Value      
+  ) |> 
+  rename( county_name = Area_Name, Unemployment_rate = Unemployment_rate_2023, Median_Household_Income = Median_Household_Income_2022) |> 
+  mutate(county_name = sub(", GA$", "", county_name)) |> 
+  select(county_name, Unemployment_rate, Median_Household_Income)
+  
+
+head(georgia_labour)
+```
+
+Data about to identify the type of counties (rural-urban)
+
+```{r}
+georgia_regions <- read.csv('data_boso/regions_georgiaUSA.csv')
+```
+
+Data about Poverty
+
+```{r}
+poverty_usa <- read.csv('data_boso//Poverty2023.csv')
+
+poverty_attributes <- c(
+  "PCTPOVALL_2023",
+  "PCTPOV017_2023"
+)
+
+georgia_poverty <- poverty_usa |> 
+  filter(Stabr == 'GA', Attribute %in% poverty_attributes) |> 
+  filter(Area_Name != "Georgia") |> 
+  pivot_wider(names_from = Attribute,  
+    values_from = Value      
+  ) |> 
+  rename( county_name = Area_Name, pct_people_poverty = PCTPOVALL_2023, pct_children_poverty = PCTPOV017_2023) |> 
+  select(-FIPS_Code, - Stabr)
+
+head(georgia_poverty)
+
+```
+
+Unify and adjust the new dataset
+
+```{r}
+georgia_data <- georgia_pop |> 
+  full_join(georgia_regions, by = "county_name") |> 
+  full_join(georgia_health, by = "county_name") |> 
+  full_join(georgia_poverty,  by =  "county_name") |> 
+  full_join(georgia_labour,   by =  "county_name") |> 
+  full_join(georgia_education,by =  "county_name") 
+
+desired_order <- c(
+  "county_fips", "county_name", "region", "Population", "Life Expectancy", 
+  "% 65 and Over", "% Black", "% Non-Hispanic White", "Food Environment Index", 
+  "% Uninsured", "Average Daily PM2.5", "% Severe Housing Problems", 
+  "% Fair or Poor Health", "pct_people_poverty", "pct_children_poverty", 
+  "Unemployment_rate", "Median_Household_Income", "pct_low_edu", 
+  "pct_middle_low_edu", "pct_middle_high_edu", "pct_high_edu"
+)
+
+georgia_data <- georgia_data[, desired_order]
+
+head(georgia_data)
+```
+
+## Pre-process data and make descriptive analysis
+
+### The dataset
+
+Now that we have our dataset we can look at each and every variable that we have:
+
+-   [county_fips]{.underline}: code to identify the county 
+
+-   [county_name]{.underline}: the name of the specific county
+
+-   [region]{.underline}: to distinguish if the county in question is rural or urban.
+
+-   [Population]{.underline}: total population of the county according to the 2020 U.S. Census.
+
+-   [Life Expectancy]{.underline}: the life expectancy in that county
+
+-   [% 65 and Over]{.underline}: percentage of population ages 65 and older.
+
+-   [% Black]{.underline}: percentage of population identifying as non-Hispanic Black or African American.
+
+-   [% Non-Hispanic White]{.underline}: percentage of population identifying as non-Hispanic white.
+
+-   [Food Environment Index]{.underline}: index of factors that contribute to a healthy food environment, from 0 (worst) to 10 (best).
+
+-   [% Uninsured]{.underline}: percentage of population under age 65 without health insurance.
+
+-   [Average Daily PM2.5]{.underline}: average daily amount of fine particulate matter in micrograms per cubic meter
+
+-   [% Severe Housing Problems]{.underline}: percentage of households with at least 1 of 4 housing problems: overcrowding, high housing costs, or lack of kitchen or plumbing facilities
+
+-   [% Fair or Poor Health]{.underline}: percentage of adults that report fair or poor health
+
+-   [pct_people_poverty]{.underline}: percentage of the total population living below the poverty line.
+
+-   [pct_children_poverty]{.underline}: percentage of children living below the poverty line in the county.
+
+-   [Unemployment_rate]{.underline}: percentage of the total labor force that is unemployed.
+
+-   [Median_Household_Income]{.underline}: median household income within the county.
+
+-   [pct_low_edu]{.underline}: percentage of the population with the lowest level of education (less than a high school diploma).
+
+-   [pct_middle_low_edu]{.underline}: percentage of the population with medium-low education (high school diploma).
+
+-   [pct_middle_high_edu]{.underline}: percentage of the population with medium-high education (some college or an associate degree).
+
+-   [pct_high_edu]{.underline}: percentage of the population with the highest level of education (bachelor’s degree or higher).
+
+### Looking if there ar some NAs and duplicates in the dataset
+
+```{r}
+summary(georgia_data)
+```
+
+We have 4 NAs in the variable 'Food Environment Index' and one in 'Life Expectancy', we will try to manually estimate the NAs basically looking at similar countries that share the same characteristic (IMPUTE WITH THE MEAN) -\> compute the variable of similar counties, doing the mean to predict the missing value
+
+```{r}
+m = 4 # number of multiple imputations
+mice_mod <- mice(georgia_data, m=m, method='rf')
+georgia_data <- complete(mice_mod, action=m)
+```
+
+Now we will do the summery operation again to see if we have solved the NAs problem
+
+```{r}
+summary(georgia_data)
+```
+
+Seem like we do! Now we will check for some duplicates
+
+```{r}
+sum(duplicated(georgia_data))
+```
+
+There aren't!
+
+### Creating some exploratory plots: histograms and boxplots
+
+```{r}
+numeric_vars <- georgia_data |> 
+  select(where(is.numeric)) |> 
+  names()
+
+georgia_data |> 
+  select(all_of(numeric_vars)) |> 
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "value") |> 
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~ variable, scales = "free") +
+  labs(title = "Histograms of Numeric Variables") +
+  theme_minimal() +
+  scale_x_continuous(labels = comma)
+
+```
+
+From these histograms, we can extract several important insights into the socioeconomic and demographic characteristics of the state of Georgia.
+
+**Population**-related variables such as Population, Unemployment Rate, and % 65 and Over display a clear right-skew, indicating that most counties are sparsely populated with a smaller proportion of elderly residents. However, a few urban centers dominate in terms of population size.
+
+**Economic** indicators reveal notable disparities across the state. The Median Household Income distribution is right-skewed, suggesting that while most counties have moderate income levels, a few wealthier counties significantly raise the upper range. Poverty-related metrics, such as pct_people_poverty and pct_children_poverty, also show right-skewed distributions, highlighting that economic hardship is widespread across many counties, with some areas experiencing extreme poverty levels.
+
+**Educational** attainment reflects a similar divide, with variables like pct_high_education and pct_low-education indicating that most counties have low levels of higher educational achievement. However, a small number of counties stand out with significantly higher education rates, suggesting localized educational advantages.
+
+**Environmental** factors, including Average Daily PM2.5 and the Food Environment Index, show a more normal distribution, indicating relatively consistent conditions across most counties, though some areas face greater environmental and food accessibility challenges.
+
+**Health**-related variables, such as % Uninsured and Life Expectancy, are also right-skewed, implying disparities in healthcare access and outcomes across different counties. Some counties show much higher uninsured rates and shorter life expectancies than the state average.
+
+**Racial** demographics reveal significant disparities. The % Non-Hispanic White population follows an approximately normal distribution, suggesting a relatively even spread across counties. In contrast, the % Black population distribution is right-skewed, indicating that while many counties have smaller Black populations, there are specific areas with significantly higher concentrations.
+
+```{r}
+georgia_data |> 
+  select(all_of(numeric_vars)) |> 
+  pivot_longer(cols = everything(),
+               names_to = "variable",
+               values_to = "value") |> 
+  ggplot(aes(y = value)) +
+  geom_boxplot(fill = "steelblue") +
+  facet_wrap(~ variable, scales = "free") +
+  labs(title = "Boxplots of Numeric Variables") +
+  scale_y_continuous(labels = comma) +
+  theme_minimal()
+
+```
+
+These updated boxplots provide additional insights.
+
+While outliers in **Population**, Unemployment Rate, and % 65 and Over still emphasize urban dominance, the Median Household Income boxplot now reveals a more pronounced spread, suggesting a wider income disparity than previously observed.
+
+**Environmental** factors such as Average Daily PM2.5 and the Food Environment Index now show clearer outliers, indicating that some counties face significantly worse air quality and food accessibility challenges compared to others.
+
+**Health**-related variables, including % Uninsured and Life Expectancy, display more distinct outliers, highlighting areas with particularly limited healthcare access and shorter life expectancies.
+
+In terms of **Education**, the variability in pct_high_education and pct_low_education is more evident, suggesting sharper educational inequalities, with some counties significantly outperforming others.
+
+**Racial** demographics remain consistent; however, the % Black distribution reveals even greater variability than before, suggesting a stronger concentration of Black populations in specific counties. Additionally, variables like % Severe Housing Problems now show clearer disparities, pointing to housing challenges in certain regions that weren’t as apparent in previous plots.
+
+### Correlation Matrix
+
+```{r}
+ggcorr(georgia_data, label = T)
+```
+
+From the correlation matrix, we can observe several strong relationships between socioeconomic and health-related variables. There is a strong positive correlation between pct_children_poverty and pct_poverty_all (0.9), suggesting that areas with higher child poverty rates also tend to have higher overall poverty levels. Similarly, pct_people_poverty shows a strong positive correlation with % Fair and Poor Health (0.9), indicating that regions with higher poverty levels tend to report poorer health outcomes. Additionally, % Fair and Poor Health is also strongly positively correlated with pct_children_poverty (0.9), reinforcing the connection between economic hardship and adverse health conditions.
+
+On the other hand, median_house_income demonstrates strong negative correlations with several variables: pct_people_poverty (-0.9), pct_children_poverty (-0.9), and % Fair and Poor Health (-0.9). This indicates that areas with higher median household incomes tend to have lower poverty rates and better overall health outcomes. There is also a notable positive correlation between median_house_income and pct_high_education (0.8), suggesting that higher income levels are associated with greater educational attainment.
+
+Education appears to play a significant role in shaping health outcomes as well. There is a strong negative correlation between % Fair and Poor Health and pct_high_education (-0.8), implying that higher education levels are linked to better health statuses within a population. These correlations highlight the interconnectedness of income, education, poverty, and health in shaping socioeconomic conditions.
+
+### Intelligent plot
+
+```{r}
+b = ggplot(georgia_data, aes(x = `% Fair or Poor Health`, 
+                         y = pct_high_edu, 
+                         group = region, 
+                         size = Population, 
+                         color = Median_Household_Income,
+                         text = county_name)) +
+  geom_point(alpha = 0.8) +
+  facet_wrap(~ region) +
+  scale_color_gradient(low = "red", high = "lightgreen") +
+  theme_minimal() +
+  labs(
+    title = "% Poor Health vs. % High Education",
+    subtitle = "(Color indicates median household income, size indicates population)",
+    x = "Percentage of Poor Health",
+    y = "Percentage of High Education"
+  )
+
+ggplotly(b, tooltip=c("county_name"))
+```
+
+We can gain some insights into the characteristics of Georgia's regions. As seen in the correlation matrix there appears to be a negative correlation between the percentage of individuals reporting poor health and the percentage of those with higher education. Additionally, median household income appears to be positively associated with educational attainment (they have a correlation of 0.8) and inversely related to poor health outcomes (with a correlation of -0.9).
+
+The distinction between rural and urban counties is particularly visible. Rural counties are concentrated in the lower-right quadrant of the graph, indicating higher percentages of poor health and lower education levels, whereas urban counties are more dispersed, with a noticeable presence in areas of higher education and better health outcomes. Looking in more detail at the different types of counties, we can observe the following:
+
+-   In [rural]{.underline} counties, there is a clear concentration of data points showing high rates of poor health and low percentages of higher education attainment. Most rural counties also display lower median household incomes. This suggests that rural areas in Georgia are more economically disadvantaged, with limited access to educational and healthcare resources contributing to poorer health outcomes.
+
+-   In contrast, [urban]{.underline} counties tend to show higher education levels and lower rates of poor health. These counties also generally have higher household incomes. The urban data points are spread more widely across the graph, highlighting greater socioeconomic diversity within urban areas.
+
+## Apply PCA and interpret
+
+Since I have numerous interrelated variables and a moderately high number of them, I aim to reduce the dimensionality of the dataset by representing the multivariate information with a smaller set of variables, while retaining as much of the original information as possible -\> so I will apply PCA
+
+```{r}
+Y = georgia_data %>% dplyr::select(-county_fips, -county_name,-region, -Population) 
+
+# We just save the names and continents for the graphs
+county_name = georgia_data$county_name
+region = georgia_data$region
+```
+
+```{r}
+pca = prcomp(Y, scale = TRUE)
+  pca
+```
+
+From this results we can see that the standard deviation for each principal component is the highest in the first PCs (PC1-PC2) meaning that they capture the most significant variances in the georgia_data dataset (after the first PC the amount of variance explain by each component decrease significantly at every following PC).
+
+-   From the first principal component: we can find that the highest contribution (in absolute values) came from the variables: % Fair or Poor Health, pct_children_poverty, Median_Household_Income, pct_people_poverty, pct_high_edu, pct_low_edu, Life Expectancy and pct_middle_low_edu -\> this dimension is dominated by poverty, education, health, and economic factors, it likely represents a "Socioeconomic & Health Disparity Dimension."
+
+-   From the second principal component: the highest contribution came from: Non-Hispanic White, % Black, % Uninsured, Average Daily PM25 and % Severe Housing Problems
+
+```{r}
+fviz_screeplot(pca, addlabels = TRUE)
+```
+
+The barplot rapresents the interpretation that i was talking about before. But from this we can get an information that we couldn't know before: the percentage of the contibution of every singular component to the whole model. The PC1 for example can, alone, explains 44.4% of the total variance of the original datasets if we add as well the variables that compone the PC2 (which explains around 16%) the cumulative variance will be 60.4%
+
+### First component
+
+Now we can look in more detail the relevant variables of the PC1. As said before PC1 probably captures socioeconomic and health-related disparities.
+
+```{r}
+fviz_contrib(pca, choice = "var", axes = 1)
+```
+
+We can get also a list of 10 counties where the influence of the variables associated with the PC1 is the highest and the lowest.
+
+```{r}
+county_name[order(pca$x[,1])][1:5]
+county_name[order(pca$x[,1], decreasing=T)][1:5]
+```
+
+We can filters the dataset to display all variables for Hancock County and Forsyth County and compare it with the summary of the georgia_data dataset. It become evident that Hancock County is one of the most disadvantaged (the majority of the values of its variables are closed to the min or to the first quantile). And that Forsyth County is one of the most advantaged (all values of the variables present in the PC1 are closed to the max or to the 3rd quantile).
+
+```{r}
+summary(georgia_data)
+
+georgia_data[county_name == "Hancock County", ]
+
+georgia_data[county_name == "Forsyth County", ]
+```
+
+### Second component
+
+We can see how the other variables that compose the second dimension are influencing the different counties, we can see that for example, % of white people in the county has a beneficial effect in this dimension and that % of black have a negative one. If we look at absolute values we can say that the other variables that influence the most the PC2 are % Uninsured (in a positive way, if the % is growing so are the effect on this dimension) and the Average Daily PM2.5,% and Severe Housing Problems (in a negative way). It's interesting to notice how education influence this dimension, lower level have a positive effects and the % of people with a bachelor or a university degree have a negative effect. A positive effect came also from the % of people how are 65 or older.
+
+```{r}
+barplot(pca$rotation[,2], las=2, col="steelblue")
+```
+
+Contribution of variables to second component: we can see that the most influential variables are % of white and % of black (contribution to the PC2 by the 25% and 22% ). Other relevant variables are % Uninsured, Average Daily PM2.5,% and Severe Housing Problems (by a lesser % then the previous 2 variables, but they still have a considerable influence in the contribution of the PC2). All this component, who defy the second dimension, are in some type way capturing a demographic, environmental and social divide between the counties of the State of Georgia.
+
+```{r}
+fviz_contrib(pca, choice = "var", axes = 2)
+```
+
+Maybe we can get more insights by ranking the countries using this component:
+
+```{r}
+county_name[order(pca$x[,2])][1:5]
+county_name[order(pca$x[,2], decreasing=T)][1:5]
+
+summary(georgia_data)
+
+georgia_data[county_name == "Dougherty County", ]
+
+georgia_data[county_name == "Brantley County", ]
+```
+
+As said before the counties with the highest % of Black folks and generally higher level Average Daily PM2.5,% and Severe Housing Problems are on the bottom ranking of this component (like Dougherty County) and the ones that have a high % of white folks and % Uninsured and a low attributes of Average Daily PM2.5,% and Severe Housing Problems are on the top part of this ranking.
+
+### Plot the first two scores
+
+Now we can compare the first two Pcs and see if they are independent between them.
+
+```{r}
+data.frame(z1=pca$x[,1],z2=pca$x[,2]) %>% 
+  ggplot(aes(z1,z2,label=county_name,color=region)) + geom_point(size=0) +
+  labs(title="First two principal components (scores)", x="PC1", y="PC2") + #guides(color=guide_legend(title="HDI"))+
+  theme_bw() +theme(legend.position="bottom") + geom_text(size=3, hjust=0.6, vjust=0, check_overlap = TRUE) 
+```
+
+As said before the two component represents different dimensions:
+
+-   PC1 (X-axis): captres the socioeconomic and health disparities (low-income, poverty vs. high-income, better health).
+-   PC2 (Y-axis): captures the demographic and environmental disparities (racial composition, air pollution, housing issues).
+
+And from this plot we can see that the urban counties (e.g., Fulton, Forsyth, Cobb, Columbia) are positioned on the right side of the graph (high PC1 scores), meaning they have better socioeconomic conditions (higher income, better education, and lower poverty). On the other hand, rural counties (e.g., Dougherty, Hancock, Wheeler, Telfair) appear on the left (low PC1 scores), indicating worse socioeconomic conditions (higher poverty, worse health outcomes, and lower income). We can say that PC1 and Pc2 are independent because:
+
+-   a high PC1 score doesn’t predict PC2 scores
+
+-   each PC captures unique information without overlapping with others.
+
+## Clustering
+
+With clustering, we aim to go beyond the simple rural vs. urban dichotomy and identify groups of counties with similar characteristics. This approach also helps reduce complexity, as it allows us to analyze a few representative groups instead of examining each county individually, making the analysis more structured and insightful.
+
+Let's start with 4 different cluster and let's see their characteristics
+
+```{r}
+fit = kmeans(scale(Y), centers=3, nstart = 1000)
+```
+
+### Interpretation of the center
+
+```{r}
+centers=fit$centers
+k = 3
+
+par(mfrow = c(2, 3))
+for (i in 1:k) {
+  barplot(centers[i, ], 
+          main = paste("Cluster", i, "Center"), 
+          las = 2, 
+          col = "steelblue",
+          ylim = c(min(centers), max(centers)))
+}
+par(mfrow = c(1, 1))
+```
+
+We can not see in detail, it's better to see every graph one by one:
+
+```{r}
+centers=fit$centers
+
+par(mar=c(10,4,4,2)) 
+barplot(centers[1,], las=2, col="steelblue", cex.names=0.8)
+barplot(centers[2,], las=2, col="orange", cex.names=0.8)
+barplot(centers[3,], las=2, col="purple", cex.names=0.8)
+
+```
+
+-   The first cluster has a lower percentage of people aged 65 and older than the average, a higher percentage of Black residents, and fewer White residents. There is also a higher percentage of people affected by severe housing problems. The population is generally well-educated, with a higher percentage of individuals who have attended college or university compared to those with lower levels of education. Additionally, key indicators such as life expectancy, percentage of people in fair or poor health, overall poverty rate, and child poverty rate show close to zero variance. There is a moderate level of unemployment, and the median household income is slightly lower than the average. This cluster generally represents diverse, socioeconomically challenged communities with a stable yet unequal health and economic landscape.
+
+-   The second cluster has a higher percentage of White people and a lower percentage of Black people. Several variables have values slightly above the average, including life expectancy, the percentage of people aged 65 and older, the food environment index, the percentage of uninsured individuals, and median household income. Conversely, some variables have values below the average, such as average daily PM2.5 (air pollution), the percentage of severe housing problems, the percentage of people in fair or poor health, the overall poverty rate, the child poverty rate, and the unemployment rate. This cluster represents predominantly White, older, suburban, or rural communities with stable economic and health conditions.
+
+-   The third cluster has higher values for life expectancy, the food environment index, and average daily PM2.5 (air pollution). The highest values are found in median household income and the percentage of individuals with higher education (pct_high_edu). Moderately lower values are observed for the percentage of people aged 65 and older, the percentage of Black residents, the percentage of severe housing problems, and the unemployment rate. Significantly lower values are recorded for the percentage of people in fair or poor health, the overall poverty rate, child poverty, and the percentages of individuals with low and middle-low education levels. Variables that remain close to zero include the percentage of White residents and the percentage of individuals with middle-high education (pct_middle_high_edu). This cluster represents affluent, highly educated communities with strong economic and health conditions. It is characterized by high median household income and a well-educated population, with a significant share of residents holding higher education degrees.
+
+### Clusplot
+
+We can also rapresent the 3 different cluster in a plot
+
+```{r}
+fviz_cluster(fit, data = Y, geom = c("point"),ellipse.type = 'norm', pointsize=1)+
+  theme_minimal()+geom_text(label=county_name,hjust=0, vjust=0,size=2,check_overlap = F)+scale_fill_brewer(palette="Paired")
+```
+
+Comparing these results with the division between rural and urban counties, we can see that the first and second clusters appear to have a fairly equal distribution of rural and urban counties. However, the first cluster contains the fewest counties among all four clusters. The third cluster is the only one where urban counties outnumber rural counties, although a considerable number of rural counties are still present in this group.
+
+### Number of groups?
+
+We can see the number of cluster that the machine will reccomand us to use for the clustering
+
+```{r}
+fviz_nbclust(scale(Y), kmeans, method = 'wss', k.max = 20, nstart = 1000)
+fviz_nbclust(scale(Y), kmeans, method = 'silhouette', k.max = 20, nstart = 1000)
+```
+
+The 'silhouette' method indicates that the optimal number of clusters is two, which is valid; however, in my opinion, this would oversimplify the analysis, essentially reducing it to a basic division between rural and urban areas. This approach would result in the loss of valuable insights gained from the clustering process and limit the depth of the analysis.
+
+### Hierarchical clustering
+
+It is important to decide on the distance metric and linkage method when performing hierarchical clustering.
+
+At first, we compute the distance matrix using the Euclidean distance after scaling the data. Then, we apply hierarchical clustering using the "complete" linkage method, which considers the maximum distance between clusters when merging them. I have considerate using other linkage methods such as "average", "single", "mcquitty" but in the following part, the one about the visualization by dendrogram, the results (apart from method = 'complete') where strange with a big cluster with the 90% of the counties that where forming the cluster and the other three cluster with only 2-3 counties.
+
+```{r}
+#basic hierarchical 
+d = dist(scale(Y), method = "euclidean")
+hc <- hclust(d, method = "complete")
+```
+
+### Visualization
+
+Classical dendrogram:
+
+```{r}
+hc$labels <- county_name
+
+fviz_dend(x = hc, 
+          k=3,
+          palette = "jco", 
+          rect = TRUE, rect_fill = TRUE, cex=0.5,
+          rect_border = "jco"          
+)
+```
+From this dendrogram, we can observe the relationship within the clustering of these counties. Looking at the plot, we can see that the grey and yellow areas are related to each other. However, their branches merge at a relatively high height, indicating that while they share some similarities, their level of similarity is lower than expected. This suggests that these clusters are distinct but still connected, though their differences are significant enough to warrant separation at a higher threshold.
+
+Let's use a phylogenic tree to see in more detail the clustering division between the counties and the distance that they have between them:
+
+```{r}
+fviz_dend(x = hc,
+          k = 3,
+          color_labels_by_k = TRUE,
+          cex = 0.8,
+          type = "phylogenic",
+          repel = TRUE)+ labs(title="Socio-economic-demographic tree clustering of the counties of the state of Georgia") + theme(axis.text.x=element_blank(),axis.text.y=element_blank())
+```
+
+## Interpretation
+
+### Interpretation of the PCA
+
+```{r}
+df_pca <- data.frame(
+    county_name = georgia_data$county_name,
+    PC1 = pca$x[,1],  # First Principal Component
+    PC2 = pca$x[,2],  # Second Principal Component
+    region = georgia_data$region,
+    stringsAsFactors = FALSE
+)
+
+# i want to create a  Weighted Sum of PC1 and PC2 (based on their contribution on the model)
+df_pca$PC_combined <- (0.7357 * df_pca$PC1) + (0.2643 * df_pca$PC2)
+
+df_merge <- dplyr::left_join(df_pca, georgia_election, by = "county_name")
+
+corr_value <- cor(df_merge$PC_combined, df_merge$pct_gop, use = "complete.obs")
+
+plot_gg <- ggplot(df_merge, aes(x = PC_combined, y = pct_gop, color = region, text = county_name)) +
+  geom_point(alpha = 0.7) +
+  theme_minimal() +
+  labs(
+    title = paste0("PPC1 and PC2 vs % of votes for the GOP presidential candidate\nCorrelation = ",
+                   round(corr_value, 3)),
+    x = "PC1 and PC2",
+    y = "% votes for GOP"
+  ) +
+  theme(legend.position = "bottom")
+
+ggplotly(plot_gg, tooltip = c("x", "y", "text"))
+
+```
+
+The correlation of 0.305 indicates a moderate positive relationship between the PC1+PC2 index and GOP vote percentage. Counties with higher PC1+PC2 values (indicating better socioeconomic conditions, a predominantly White population, and urban characteristics) tend to vote more Republican—but the trend is not very strong.
+
+This, in some ways, challenges the common notion that rural areas with certain socioeconomic characteristics overwhelmingly vote for the Republican Party. It is also interesting to note the significant variation in voting patterns even among counties with similar PC1+PC2 scores. Some counties with low PC1+PC2 scores still exhibit high GOP vote percentages, suggesting that factors beyond socioeconomic and demographic indicators play a crucial role in shaping voting behavior in the state of Georgia.
+
+One potentially relevant factor missing from this model is the level of trust and loyalty toward the Republican Party. In today’s political landscape, partisan alignment is increasingly shaped by personal identity and loyalty rather than traditional ideological differences. The role of central figures like Donald Trump has transcended conventional political ideologies, making party loyalty and personal trust in leaders a key driver of voting behavior, beyond socioeconomic and demographic factors.
+
+### Interpretation of Clustering
+
+```{r}
+options(tigris_use_cache = TRUE)
+
+georgia_counties <- counties(state = "GA", cb = TRUE, class = "sf")
+
+georgia_counties$GEOID <- as.integer(georgia_counties$GEOID)
+
+groups.hc <- cutree(hc, k = 3)
+
+georgia_map_data <- data.frame(
+  county_fips = georgia_data$county_fips,  # County FIPS from your data
+  cluster = groups.hc                      # Clustering results
+)
+
+georgia_counties <- georgia_counties %>%
+  left_join(georgia_map_data, by = c("GEOID" = "county_fips"))
+
+ggplot(data = georgia_counties) +
+  geom_sf(aes(fill = as.factor(cluster)), color = "black") +  # Color by cluster
+  scale_fill_manual(values = rainbow(length(unique(groups.hc)))) +  # Distinct colors per cluster
+  theme_minimal() +
+  labs(
+    title = "Georgia Counties Cluster Map",
+    fill = "Cluster"
+  )
+```
+The clustering has provide a clear distinction between rural, suburban, and urban counties across Georgia.
+
+The red counties (Cluster 1) are primarily located in central, southern, and eastern Georgia, representing largely rural areas that face significant economic and health disadvantages. These counties tend to have lower median household incomes, higher poverty rates, and lower education levels, contributing to higher unemployment and poorer health outcomes. Limited access to healthcare and essential services, combined with fewer economic opportunities, makes these areas particularly vulnerable. These counties are characteristic of regions where rural poverty and social inequalities are most pronounced.
+
+The green counties (Cluster 2) occupy a middle ground, encompassing a mix of suburban and semi-rural areas spread throughout the state. While they do not experience the severe economic hardships of Cluster 1, they also do not enjoy the same level of prosperity as the most developed counties. These counties have moderate income levels, relatively lower unemployment, and better access to healthcare compared to the more disadvantaged areas. They reflect communities where economic stability is present, but challenges such as income disparities, education gaps, and healthcare accessibility still exist.
+
+The blue counties (Cluster 3), on the other hand, are primarily found in northwestern Georgia and metropolitan areas, including the Atlanta metro region. These counties represent urban and developed areas where economic and social conditions are significantly stronger. They are characterized by higher median household incomes, lower poverty rates, and better education levels, resulting in higher life expectancy and improved overall well-being. Residents in these areas benefit from better access to healthcare, employment opportunities, and infrastructure, which contribute to their stronger economic standing.
+
+## Conclusions about main objective
+
+```{r}
+merged_data <- left_join(georgia_election, georgia_map_data , by = "county_fips")
+
+# Check the first few rows
+head(merged_data)
+
+# Summarize average voting percentages per cluster
+cluster_summary <- merged_data %>%
+  group_by(cluster) %>%
+  summarise(
+    avg_republicans = mean(`pct_gop`, na.rm = TRUE),
+    avg_democrats = mean(`pct_dem`, na.rm = TRUE)
+  )
+
+# Print the summary
+print(cluster_summary)
+
+# Visualize the voting pattern per cluster
+ggplot(merged_data, aes(x = as.factor(cluster), y = `pct_gop`, fill = as.factor(cluster))) +
+  geom_boxplot() +
+  labs(title = "Republican Vote Percentage by Cluster", x = "Cluster", y = "Republican Vote %") +
+  theme_minimal()
+
+ggplot(merged_data, aes(x = as.factor(cluster), y = `pct_dem`, fill = as.factor(cluster))) +
+  geom_boxplot() +
+  labs(title = "Democratic Vote Percentage by Cluster", x = "Cluster", y = "Democratic Vote %") +
+  theme_minimal()
+```
+
+The common assumption that rural residents with lower levels of education overwhelmingly vote for the Republican Party, while urban, highly educated individuals consistently support the Democratic Party, is an oversimplification of a far more complex reality. By analyzing voting patterns in Georgia through PCA (Principal Component Analysis) and hierarchical clustering, we have demonstrated that political preferences cannot be reduced to a simple urban-rural divide.
+
+The PCA results have revealed that a citizen's vote is influenced by a wide range of socioeconomic and environmental conditions. Factors such as income, education level, race, poverty status, access to healthy food, personal health, and environmental conditions all contribute to shaping political preferences. However, none of these factors alone are sufficient to accurately predict how an individual will vote. This challenges the idea that demographic categories can serve as definitive predictors of political alignment.
+
+Furthermore, the clustering analysis has shown that even in urbanized counties, where Democratic support is often assumed to be dominant, voting patterns are more balanced and diverse than expected. Not all city dwellers vote Democratic, just as not all rural residents vote Republican. Political behavior is nuanced, influenced by local economic conditions, historical context, cultural identity, and personal experiences rather than solely by geography or educational attainment.
