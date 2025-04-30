@@ -1,2 +1,6 @@
 # urban_rural_vote_georgia_USA
-Files associated with my analysis of urban and rural voting behaviour in Georgia (U.S.A.) 
+Does the common perception that rural residents with low levels of education overwhelmingly vote for the Republican Party, while urban residents with higher education levels automatically support the Democratic Party, truly reflect reality? Or is the situation more complex than this? Many newspapers have drawn this conclusion (https://www.nytimes.com/2019/10/29/upshot/suburbs-demographics-red-blue.html), so I have decided to verify this assumption by analyzing the voting macrocategories in the state of Georgia.
+
+Georgia is an ideal case study for this analysis because it has one of the highest numbers of counties in the United States - the third-highest, to be exact - which allows for a more granular and specific examination of voting trends compared to states like California, where the distinction between rural and urban areas is harder to define due to its 54 highly diverse counties.
+
+Additionally, Georgia’s recent voting history adds another layer of relevance to this analysis In the 2020 presidential election, the state was won by the Democratic candidate, now-President Joe Biden. However, in the 2024 election, the Republican candidate, now-President Donald Trump, secured victory in the state. This shift highlights the potential for dynamic political behavior across different regions, making Georgia a particularly interesting case.
